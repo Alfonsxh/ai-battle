@@ -254,8 +254,20 @@ $user_msg
 
     local text=""
 
-    # 从输出中提取有效内容（跳过 codex 元数据行）
-    text=$(grep -v '^\(thinking\|exec\|mcp startup\|OpenAI Codex\|--------\|workdir:\|model:\|provider:\|approval:\|sandbox:\|reasoning\|session id:\|user$\|tokens used\|Exit code:\|^$\)' "$tmpout" 2>/dev/null | sed '/^$/d')
+    # 从输出中提取有效内容
+    # 1. 先截取 codex 标记行之后的内容（跳过 prompt 回显和 thinking 块）
+    # 2. 再过滤掉元数据行和 token 统计
+    if grep -qn '^codex$' "$tmpout" 2>/dev/null; then
+      # 找到最后一个 "codex" 标记行，取其后所有内容（即真正回复）
+      local codex_line
+      codex_line=$(grep -n '^codex$' "$tmpout" | tail -1 | cut -d':' -f1)
+      text=$(tail -n "+$((codex_line + 1))" "$tmpout" \
+        | grep -v '^\(tokens used\|Exit code:\|[0-9,]*$\)' \
+        | sed '/^$/d')
+    else
+      # 兜底: 无 codex 标记时沿用原始过滤
+      text=$(grep -v '^\(thinking\|exec\|mcp startup\|OpenAI Codex\|--------\|workdir:\|model:\|provider:\|approval:\|sandbox:\|reasoning\|session id:\|user$\|tokens used\|Exit code:\|^$\)' "$tmpout" 2>/dev/null | sed '/^$/d')
+    fi
 
     rm -f "$tmpout"
 
@@ -489,15 +501,26 @@ log_and_print() {
   echo -e "$1" | sed 's/\x1b\[[0-9;]*m//g' >> "$LOG_FILE"
 }
 
-# 检查 AGREED 关键字（支持行内匹配，不要求行首）
+# 检查 AGREED 关键字（要求行首匹配，避免误触发）
 has_agreed() {
-  echo "$1" | grep -qiE '\*{0,2}AGREED:'
+  # 要求 AGREED: 出现在行首（允许 ** 加粗），避免匹配标题或 prompt 模板中的 AGREED
+  echo "$1" | grep -qE '^\*{0,2}AGREED:[[:space:]]'
 }
 
 # 提取 AGREED 后的结论
 extract_agreed() {
-  echo "$1" | grep -ioE '\*{0,2}AGREED:[[:space:]]*.*' | head -1 \
-    | sed 's/^\*\{0,2\}[Aa][Gg][Rr][Ee][Ee][Dd]:[[:space:]]*//' | sed 's/[[:space:]]*$//' | sed 's/\*\{1,2\}$//'
+  # 提取行首 AGREED: 后面的结论文本
+  local raw
+  raw=$(echo "$1" | grep -oE '^\*{0,2}AGREED:[[:space:]]*.*' | head -1 \
+    | sed 's/^\*\{0,2\}AGREED:[[:space:]]*//' | sed 's/[[:space:]]*$//' | sed 's/\*\{1,2\}$//')
+
+  # 校验: 拒绝占位符结论（如 <共识结论>, <xxx> 等）
+  if echo "$raw" | grep -qE '^<[^>]+>$'; then
+    echo ""
+    return
+  fi
+
+  echo "$raw"
 }
 
 # Agent 颜色映射（自动提取基础类型）
