@@ -1,0 +1,24 @@
+# ai-battle 运行时产物
+.debate.log
+.debate.json
+.sessions/
+rounds/
+consensus.md
+SUMMARY.md
+
+# Agent 指令文件（动态生成）
+CLAUDE*.md
+AGENTS*.md
+GEMINI*.md
+
+# 环境配置
+.env
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
