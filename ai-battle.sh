@@ -216,20 +216,20 @@ check_codex() {
 }
 
 # 调用 Codex
-# 参数: $1=system_prompt  $2=user_message
+# 参数: $1=system_prompt  $2=user_message  $3=session_tag(可选)
+# 输出: stdout 回复文本
 call_codex() {
   local system_prompt="$1"
   local user_msg="$2"
   local session_tag="${3:-}"  # 可选: session 文件名标识
+  local max_retries=3
+  local retry_delay=10
 
   local full_prompt="$system_prompt
 
 $user_msg
 
 重要：直接输出你的分析内容，不要写任何文件，不要输出方案图或伪代码，直接给出你的讨论观点。"
-
-  local tmpout
-  tmpout=$(mktemp)
 
   # 确保 codex 有 git 仓库
   if [ ! -d ".git" ]; then
@@ -238,28 +238,40 @@ $user_msg
     git commit -q -m "debate-init" 2>/dev/null || true
   fi
 
-  codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox \
-    -m "$CODEX_MODEL" "$full_prompt" \
-    2>&1 | tee "$tmpout" > /dev/null || true
+  local attempt=1
+  while [ $attempt -le $max_retries ]; do
+    local tmpout
+    tmpout=$(mktemp)
 
-  # 保存原始 session 记录
-  if [ -n "$session_tag" ] && [ -d "$SESSIONS_DIR" ]; then
-    cp "$tmpout" "$SESSIONS_DIR/${session_tag}_codex.raw"
-  fi
+    codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox \
+      -m "$CODEX_MODEL" "$full_prompt" \
+      2>&1 | tee "$tmpout" > /dev/null || true
 
-  local text=""
+    # 保存原始 session 记录
+    if [ -n "$session_tag" ] && [ -d "$SESSIONS_DIR" ]; then
+      cp "$tmpout" "$SESSIONS_DIR/${session_tag}_codex.raw"
+    fi
 
-  # 从输出中提取有效内容（跳过 codex 元数据行）
-  text=$(grep -v '^\(thinking\|exec\|mcp startup\|OpenAI Codex\|--------\|workdir:\|model:\|provider:\|approval:\|sandbox:\|reasoning\|session id:\|user$\|tokens used\|Exit code:\|^$\)' "$tmpout" 2>/dev/null | sed '/^$/d')
+    local text=""
 
-  rm -f "$tmpout"
+    # 从输出中提取有效内容（跳过 codex 元数据行）
+    text=$(grep -v '^\(thinking\|exec\|mcp startup\|OpenAI Codex\|--------\|workdir:\|model:\|provider:\|approval:\|sandbox:\|reasoning\|session id:\|user$\|tokens used\|Exit code:\|^$\)' "$tmpout" 2>/dev/null | sed '/^$/d')
 
-  if [ -n "$text" ]; then
-    echo "$text"
-  else
-    echo -e "${RED}ERROR: Codex 未返回有效回复${NC}" >&2
-    return 1
-  fi
+    rm -f "$tmpout"
+
+    if [ -n "$text" ]; then
+      echo "$text"
+      return 0
+    fi
+
+    echo -e "${YELLOW}WARN: Codex 第 $attempt 次失败，${retry_delay}s 后重试...${NC}" >&2
+    sleep $retry_delay
+    attempt=$((attempt + 1))
+    retry_delay=$((retry_delay * 2))
+  done
+
+  echo -e "${RED}ERROR: Codex $max_retries 次重试均失败${NC}" >&2
+  return 1
 }
 
 # 生成 Codex 指令文件
@@ -421,6 +433,49 @@ GEMINI_EOF
 register_agent "gemini"
 
 # ======================== 工具函数 ========================
+
+# Round 层级重试包装器
+# 当 agent 内部重试耗尽后，询问用户是否继续重试
+# 参数: $1=agent名称(display)  $2+=要执行的命令
+# 输出: stdout 命令结果
+# 返回: 0=成功, 1=用户选择退出
+retry_call_agent() {
+  local agent_display="$1"
+  shift
+
+  while true; do
+    local result
+    result=$("$@" 2>/dev/null) && local rc=0 || local rc=$?
+
+    if [ $rc -eq 0 ] && [ -n "$result" ]; then
+      echo "$result"
+      return 0
+    fi
+
+    echo "" >&2
+    echo -e "${RED}━━━ ⚠️  ${agent_display} 调用失败 ━━━${NC}" >&2
+    echo -e "  ${BOLD}r)${NC} 重试" >&2
+    echo -e "  ${BOLD}s)${NC} 跳过该 agent 本轮发言" >&2
+    echo -e "  ${BOLD}q)${NC} 退出讨论" >&2
+    echo -ne "${BOLD}请选择 [r/s/q]: ${NC}" >&2
+    local choice
+    read -er choice
+    case "$choice" in
+      s|S)
+        echo -e "${YELLOW}  跳过 ${agent_display}${NC}" >&2
+        echo ""  # 返回空字符串
+        return 0
+        ;;
+      q|Q)
+        echo -e "${CYAN}已退出。${NC}" >&2
+        exit 1
+        ;;
+      *)  # 默认重试
+        echo -e "${CYAN}  重试 ${agent_display}...${NC}" >&2
+        ;;
+    esac
+  done
+}
 
 # 从实例名提取基础 agent 类型
 # 用法: agent_base "claude_1" → "claude"，agent_base "claude" → "claude"
@@ -1124,9 +1179,11 @@ $problem" "round_1_${agent}" > "$tmp" 2>/dev/null
       wait "$pid" 2>/dev/null || true
     done
 
-    # 读取所有回复
+    # 读取所有回复，失败的 agent 交互式重试
     for ((i=0; i<agent_count; i++)); do
       local agent="${available_agents[$i]}"
+      local base
+      base=$(agent_base "$agent")
       local color
       color=$(agent_color "$agent")
       if [ -s "${tmp_files[$i]}" ]; then
@@ -1136,10 +1193,18 @@ $problem" "round_1_${agent}" > "$tmp" 2>/dev/null
         log_and_print "${color}━━━ ${agent} [Round 1/${max_rounds}] ━━━${NC}"
         log_and_print "${color}${responses[$i]}${NC}"
       else
-        log_and_print "${RED}❌ ${agent} Round 1 无响应${NC}"
-        # 清理临时文件
-        for f in "${tmp_files[@]}"; do rm -f "$f"; done
-        exit 1
+        log_and_print "${YELLOW}⚠️ ${agent} Round 1 并发调用失败，进入交互式重试...${NC}"
+        responses[$i]=$(retry_call_agent "${agent} [Round 1]" "call_${base}" "$sys_prompt" "请对以下问题给出你的深入分析：
+
+$problem" "round_1_${agent}")
+        if [ -n "${responses[$i]}" ]; then
+          echo "${responses[$i]}" > "$ROUNDS_DIR/round_1_${agent}.md"
+          log_and_print ""
+          log_and_print "${color}━━━ ${agent} [Round 1/${max_rounds}] ━━━${NC}"
+          log_and_print "${color}${responses[$i]}${NC}"
+        else
+          log_and_print "${YELLOW}⏭️  ${agent} Round 1 已跳过${NC}"
+        fi
       fi
       rm -f "${tmp_files[$i]}"
     done
@@ -1215,7 +1280,11 @@ ${responses[$j]}
         prompt+="\n\n[上帝视角 - 额外补充信息]\n${god_context}"
       fi
 
-      responses[$i]=$("call_${base}" "$sys_prompt" "$prompt" "round_${round}_${agent}")
+      responses[$i]=$(retry_call_agent "${agent} [Round ${round}]" "call_${base}" "$sys_prompt" "$prompt" "round_${round}_${agent}")
+      if [ -z "${responses[$i]}" ]; then
+        log_and_print "${YELLOW}⏭️  ${agent} Round ${round} 已跳过${NC}"
+        continue
+      fi
       echo "${responses[$i]}" > "$ROUNDS_DIR/round_${round}_${agent}.md"
       log_and_print ""
       log_and_print "${color}━━━ ${agent} [Round ${round}/${max_rounds}] ━━━${NC}"
@@ -1238,13 +1307,18 @@ ${responses[$j]}
             other_color=$(agent_color "$other")
 
             local confirm
-            confirm=$("call_${other_base}" "$sys_prompt" "${agent} 提出了共识：
+            confirm=$(retry_call_agent "${other} [确认]" "call_${other_base}" "$sys_prompt" "${agent} 提出了共识：
 
 <proposed_consensus>
 $conclusion
 </proposed_consensus>
 
 请审查这个结论是否完整正确。如果同意，在回复末尾写 AGREED: <结论>。如果不同意，说明原因。" "round_${round}_${other}_confirm")
+            if [ -z "$confirm" ]; then
+              log_and_print "${YELLOW}⏭️  ${other} 确认已跳过，视为不同意${NC}"
+              all_confirmed=false
+              break
+            fi
             echo "$confirm" > "$ROUNDS_DIR/round_${round}_${other}_confirm.md"
             log_and_print "${other_color}━━━ ${other} [确认] ━━━${NC}"
             log_and_print "${other_color}${confirm}${NC}"
@@ -1406,7 +1480,11 @@ ${responses[$j]}
           prompt+="\n\n[上帝视角 - 额外补充信息]\n${god_context}"
         fi
 
-        responses[$i]=$("call_${base}" "$sys_prompt" "$prompt" "round_${round}_${agent}")
+        responses[$i]=$(retry_call_agent "${agent} [Round ${round}]" "call_${base}" "$sys_prompt" "$prompt" "round_${round}_${agent}")
+        if [ -z "${responses[$i]}" ]; then
+          log_and_print "${YELLOW}⏭️  ${agent} Round ${round} 已跳过${NC}"
+          continue
+        fi
         echo "${responses[$i]}" > "$ROUNDS_DIR/round_${round}_${agent}.md"
         log_and_print ""
         log_and_print "${color}━━━ ${agent} [Round ${round}/${max_rounds}] ━━━${NC}"
@@ -1428,13 +1506,18 @@ ${responses[$j]}
               other_color=$(agent_color "$other")
 
               local confirm
-              confirm=$("call_${other_base}" "$sys_prompt" "${agent} 提出了共识：
+              confirm=$(retry_call_agent "${other} [确认]" "call_${other_base}" "$sys_prompt" "${agent} 提出了共识：
 
 <proposed_consensus>
 $conclusion
 </proposed_consensus>
 
 请审查这个结论是否完整正确。如果同意，在回复末尾写 AGREED: <结论>。如果不同意，说明原因。" "round_${round}_${other}_confirm")
+              if [ -z "$confirm" ]; then
+                log_and_print "${YELLOW}⏭️  ${other} 确认已跳过，视为不同意${NC}"
+                all_confirmed=false
+                break
+              fi
               echo "$confirm" > "$ROUNDS_DIR/round_${round}_${other}_confirm.md"
               log_and_print "${other_color}━━━ ${other} [确认] ━━━${NC}"
               log_and_print "${other_color}${confirm}${NC}"
