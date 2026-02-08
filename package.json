@@ -1,0 +1,29 @@
+{
+    "name": "ai-battle",
+    "version": "0.1.0",
+    "description": "让多个 AI Agent 对同一问题进行结构化圆桌讨论",
+    "bin": {
+        "ai-battle": "./ai-battle.sh"
+    },
+    "files": [
+        "ai-battle.sh",
+        "README.md",
+        "LICENSE"
+    ],
+    "keywords": [
+        "ai",
+        "debate",
+        "roundtable",
+        "claude",
+        "codex",
+        "gemini",
+        "agent",
+        "cli"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/Alfonsxh/ai-battle.git"
+    },
+    "author": "Alfons",
+    "license": "MIT"
+}

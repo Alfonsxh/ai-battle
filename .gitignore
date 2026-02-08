@@ -22,3 +22,6 @@ GEMINI*.md
 .vscode/
 *.swp
 *.swo
+
+# Node
+node_modules/

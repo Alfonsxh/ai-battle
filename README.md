@@ -25,8 +25,24 @@ mkdir my-topic && cd my-topic
 # 2. 写入问题
 echo "微服务 vs 单体架构的优缺点？" > problem.md
 
-# 3. 启动讨论
-ai-battle --agents claude,gemini --rounds 8
+# 3. 启动讨论（自动拉取最新版）
+npx ai-battle --agents claude,gemini --rounds 8
+```
+
+## 📦 安装
+
+**无需安装，直接使用 npx（推荐）：**
+
+```bash
+npx ai-battle --agents claude,gemini --rounds 5
+```
+
+> npx 每次执行自动拉取最新版本，无需手动更新。
+
+**全局安装：**
+
+```bash
+npm install -g ai-battle
 ```
 
 ## 📖 用法
