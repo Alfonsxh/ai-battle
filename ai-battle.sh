@@ -22,8 +22,9 @@ if [ -f ".env" ]; then
   set +a
 fi
 
-# ======================== 版本 ========================
-VERSION="0.1.0"
+# ======================== 版本（从 package.json 读取） ========================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VERSION=$(node -p "require('${SCRIPT_DIR}/package.json').version" 2>/dev/null || echo "0.0.0")
 
 # ======================== 颜色 ========================
 BLUE='\033[1;34m'
