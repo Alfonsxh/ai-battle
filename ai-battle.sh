@@ -203,7 +203,7 @@ check_codex() {
   local resp errmsg
   local tmperr
   tmperr=$(mktemp)
-  resp=$(codex exec "hello" 2>"$tmperr") && local rc=0 || local rc=$?
+  resp=$(codex exec --skip-git-repo-check "hello" 2>"$tmperr") && local rc=0 || local rc=$?
   errmsg=$(cat "$tmperr" 2>/dev/null)
   rm -f "$tmperr"
 
