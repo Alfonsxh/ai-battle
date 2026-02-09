@@ -1815,6 +1815,7 @@ main() {
   case "${1:-}" in
     help|--help|-h) cmd_help; exit 0 ;;
     --version|-v)   echo "ai-battle v$VERSION"; exit 0 ;;
+    run)            shift ;;  # 兼容 ai-battle run ... 的调用方式
   esac
 
   # 默认行为: 启动讨论
