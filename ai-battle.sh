@@ -38,13 +38,17 @@ NC='\033[0m'
 # ======================== 默认配置 ========================
 DEFAULT_AGENTS="claude,codex"
 DEFAULT_MAX_ROUNDS=10
+
+# 工作目录：所有程序产物放入 .ai-battle/，最终总结输出到运行目录
+WORK_DIR=".ai-battle"
 PROBLEM_FILE="problem.md"
-ROUNDS_DIR="rounds"
-CONSENSUS_FILE="consensus.md"
-LOG_FILE=".debate.log"
-CONFIG_FILE=".debate.json"
+ROUNDS_DIR="${WORK_DIR}/rounds"
+CONSENSUS_FILE="${WORK_DIR}/consensus.md"
+LOG_FILE="${WORK_DIR}/battle.log"
+CONFIG_FILE="${WORK_DIR}/config.json"
 REFEREE_PROMPT_FILE="referee.md"
-SESSIONS_DIR=".sessions"
+SESSIONS_DIR="${WORK_DIR}/sessions"
+AGENTS_DIR="${WORK_DIR}/agents"
 
 # ======================== Codex 配置 ========================
 CODEX_MODEL="${CODEX_MODEL:-gpt-5.3-codex}"
@@ -537,6 +541,7 @@ agent_color() {
 }
 
 # Agent 指令文件名映射（支持实例名，如 claude_1 → CLAUDE_1.md）
+# 输出到 AGENTS_DIR 目录中
 agent_md_file() {
   local base
   base=$(agent_base "$1")
@@ -544,12 +549,14 @@ agent_md_file() {
   if [ "$1" != "$base" ]; then
     suffix="_${1##*_}"  # 提取 _N 后缀
   fi
+  local filename
   case "$base" in
-    claude) echo "CLAUDE${suffix}.md" ;;
-    codex)  echo "AGENTS${suffix}.md" ;;
-    gemini) echo "GEMINI${suffix}.md" ;;
-    *)      echo "${1^^}.md" ;;
+    claude) filename="CLAUDE${suffix}.md" ;;
+    codex)  filename="AGENTS${suffix}.md" ;;
+    gemini) filename="GEMINI${suffix}.md" ;;
+    *)      filename="${1^^}.md" ;;
   esac
+  echo "${AGENTS_DIR}/${filename}"
 }
 
 # 上帝视角: 等待用户输入补充信息
@@ -809,15 +816,24 @@ cmd_run() {
       echo -e "${CYAN}📋 已加载裁判提示词: ${REFEREE_PROMPT_FILE}${NC}"
     else
       echo -e "${YELLOW}⚠️  未找到裁判提示词文件: ${REFEREE_PROMPT_FILE}${NC}"
-      echo -e "  你可以创建该文件来自定义裁判的行为，例如:"
-      echo -e "  ${CYAN}echo '重点关注架构设计的可行性和成本' > ${REFEREE_PROMPT_FILE}${NC}"
+      echo -e "  你可以创建该文件来自定义裁判的行为"
       echo ""
-      echo -ne "${BOLD}是否跳过，使用默认裁判提示词？[Y/n]: ${NC}"
+      echo -ne "${BOLD}选择操作: [1] 编辑裁判提示词  [2] 跳过使用默认  [3] 取消: ${NC}"
       local ref_choice
       read -er ref_choice
       case "$ref_choice" in
-        n|N|no|NO)
-          echo -e "${CYAN}请创建 ${REFEREE_PROMPT_FILE} 后重新运行。${NC}"
+        1)
+          mkdir -p "$WORK_DIR"
+          ${EDITOR:-vim} "$REFEREE_PROMPT_FILE"
+          if [ -f "$REFEREE_PROMPT_FILE" ] && [ -s "$REFEREE_PROMPT_FILE" ]; then
+            referee_custom_prompt=$(cat "$REFEREE_PROMPT_FILE")
+            echo -e "${CYAN}📋 裁判提示词已保存${NC}"
+          else
+            echo -e "${CYAN}裁判提示词为空，使用默认。${NC}"
+          fi
+          ;;
+        3|n|N)
+          echo -e "${CYAN}已取消。${NC}"
           exit 0
           ;;
         *)
@@ -872,7 +888,7 @@ cmd_run() {
     case "$choice" in
       1)
         echo -e "${CYAN}清理历史记录...${NC}"
-        rm -rf "$ROUNDS_DIR" "$SESSIONS_DIR" "$CONFIG_FILE" "$CONSENSUS_FILE" "$LOG_FILE" SUMMARY.md
+        rm -rf "$WORK_DIR" SUMMARY.md
         ;;
       2)
         # 仅当有完整配置时 2=继续，否则 2=取消
@@ -894,12 +910,16 @@ cmd_run() {
     echo ""
   fi
 
-  # 检查 problem.md
+  # 检查 problem.md，不存在则自动用编辑器创建
+  mkdir -p "$WORK_DIR"
+
   if [ ! -f "$PROBLEM_FILE" ]; then
-    echo -e "${RED}❌ 当前目录缺少 $PROBLEM_FILE${NC}"
-    echo -e "${CYAN}请先创建讨论问题:${NC}"
-    echo -e "  echo \"你的问题\" > $PROBLEM_FILE"
-    exit 1
+    echo -e "${CYAN}📝 首次运行，请编辑讨论问题...${NC}"
+    ${EDITOR:-vim} "$PROBLEM_FILE"
+    if [ ! -s "$PROBLEM_FILE" ]; then
+      echo -e "${RED}❌ 问题文件为空，已取消${NC}"
+      exit 1
+    fi
   fi
 
   if [ ! -s "$PROBLEM_FILE" ]; then
@@ -1043,8 +1063,7 @@ cmd_run() {
   fi
 
   # 创建 rounds 目录
-  mkdir -p "$ROUNDS_DIR"
-  mkdir -p "$SESSIONS_DIR"
+  mkdir -p "$ROUNDS_DIR" "$SESSIONS_DIR" "$AGENTS_DIR"
 
   # 动态生成各 Agent 的指令文件（新建和恢复模式都需要更新）
   for agent in "${available_agents[@]}"; do
@@ -1062,8 +1081,7 @@ cmd_run() {
   # 初始化 git（codex 需要）
   if [ ! -d ".git" ]; then
     git init -q
-    echo ".debate.log" >> .gitignore 2>/dev/null || true
-    echo ".debate.json" >> .gitignore 2>/dev/null || true
+    echo ".ai-battle/" >> .gitignore 2>/dev/null || true
     git add -A 2>/dev/null || true
     git commit -q -m "ai-battle: init" 2>/dev/null || true
   fi
@@ -1252,7 +1270,61 @@ $problem" "round_1_${agent}")
       exit 0
     fi
 
-    # 上帝视角: Round 1 后注入
+    # 裁判总结: Round 1 结束后，调用裁判对各方初始观点进行总结
+    if $referee_mode; then
+      log_and_print ""
+      log_and_print "${BOLD}\033[1;37m━━━ 🔨 裁判总结 [Round 1/${max_rounds}] ━━━${NC}"
+      log_and_print "${CYAN}⏳ 裁判分析中...${NC}"
+
+      # 构建所有 agent 回复的汇总
+      local all_responses_r1=""
+      for ((ri=0; ri<agent_count; ri++)); do
+        local ra="${available_agents[$ri]}"
+        all_responses_r1+="<${ra}_response>
+${responses[$ri]}
+</${ra}_response>
+
+"
+      done
+
+      # 根据模式选择裁判 prompt
+      local ref_prompt_r1
+      if $god_mode; then
+        ref_prompt_r1=$(build_referee_god_prompt)
+      else
+        ref_prompt_r1=$(build_referee_free_prompt)
+      fi
+      # 追加自定义裁判提示词
+      if [ -n "$referee_custom_prompt" ]; then
+        ref_prompt_r1+=$'\n\n[额外指示]\n'"$referee_custom_prompt"
+      fi
+
+      local referee_result_r1
+      referee_result_r1=$(call_referee "$referee_base" "$ref_prompt_r1" "以下是 Round 1 各参与者的回复：
+
+${all_responses_r1}请进行裁判总结。" "referee_round_1")
+
+      # 保存裁判结果
+      echo "$referee_result_r1" > "$ROUNDS_DIR/referee_round_1.md"
+      log_and_print "${BOLD}\033[1;37m${referee_result_r1}${NC}"
+
+      # 自由辩论模式: 裁判检测共识
+      if ! $god_mode; then
+        if echo "$referee_result_r1" | grep -qiE 'CONSENSUS:[[:space:]]*YES'; then
+          local ref_conclusion_r1
+          ref_conclusion_r1=$(echo "$referee_result_r1" | grep -ioE '\*{0,2}AGREED:[[:space:]]*.*' | head -1 \
+            | sed 's/^\*\{0,2\}[Aa][Gg][Rr][Ee][Ee][Dd]:[[:space:]]*//' | sed 's/[[:space:]]*$//' | sed 's/\*\{1,2\}$//')
+          if [ -n "$ref_conclusion_r1" ]; then
+            log_and_print "${CYAN}🔨 裁判判定: 已达成共识${NC}"
+            finish_consensus "$ref_conclusion_r1" 1 "$max_rounds"
+            generate_final_summary "$referee_base" "$referee_custom_prompt"
+            exit 0
+          fi
+        fi
+      fi
+    fi
+
+    # 上帝视角: Round 1 后注入（裁判总结后再让 god 输入）
     if $god_mode; then
       god_context=$(god_input 1)
     fi
@@ -1658,8 +1730,8 @@ cmd_help() {
   检测共识、保存全部讨论记录。
 
   前置条件:
-    1. 在当前目录创建 problem.md，写入讨论问题
-    2. 确保参与讨论的 Agent CLI 工具已安装并可用
+    1. 确保参与讨论的 Agent CLI 工具已安装并可用
+    2. 首次运行会自动弹出编辑器创建讨论问题
 
   依赖: jq, bash 4+, (可选) claude, codex, gemini
 
@@ -1681,9 +1753,8 @@ cmd_help() {
     gemini    通过 Gemini CLI 调用 (需 gemini 命令)
 
   使用示例:
-    # 快速开始
+    # 快速开始（首次运行会自动弹出编辑器输入问题）
     mkdir my-topic && cd my-topic
-    echo "微服务 vs 单体架构的优缺点？" > problem.md
     ai-battle --agents claude,gemini --rounds 8
 
     # 同类 Agent 自我辩论
@@ -1705,21 +1776,22 @@ cmd_help() {
     ai-battle --agents claude,codex --referee --god
 
   产出文件:
-    rounds/                每轮讨论记录 (round_N_<agent>.md)
-    rounds/referee_*.md    裁判总结记录 (开启 --referee 时)
-    rounds/god_*.md        上帝视角注入记录 (开启 --god 时)
-    .sessions/             Agent CLI 原始输出记录 (stream-json/json/raw)
-    consensus.md           共识结论（如达成）
-    SUMMARY.md             最终总结 (裁判自动生成)
-    .debate.log            完整日志 (可用 tail -f 实时查看)
+    .ai-battle/rounds/       每轮讨论记录 (round_N_<agent>.md)
+    .ai-battle/rounds/referee_*.md  裁判总结记录 (--referee)
+    .ai-battle/rounds/god_*.md      上帝视角注入记录 (--god)
+    .ai-battle/sessions/     Agent CLI 原始输出记录
+    .ai-battle/consensus.md  共识结论（如达成）
+    .ai-battle/battle.log    完整日志
+    SUMMARY.md               最终总结 (裁判自动生成，输出到运行目录)
+
+  用户文件 (运行目录):
+    problem.md               讨论问题定义 (首次运行自动创建)
+    referee.md               裁判自定义提示词 (--referee 时可选)
+    .env                     环境变量 (启动时自动加载)
 
   扩展 Agent:
     在脚本中实现 check_<name>()、call_<name>()、generate_<name>_md()
     然后调用 register_agent "<name>"
-
-  配置文件:
-    .env                   自动加载环境变量 (启动时)
-    referee.md             裁判自定义提示词 (开启 --referee 时)
 
   环境变量:
     Claude:

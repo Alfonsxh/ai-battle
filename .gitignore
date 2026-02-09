@@ -1,17 +1,8 @@
-# ai-battle 运行时产物
-.debate.log
-.debate.json
-.sessions/
-rounds/
-consensus.md
+# ai-battle 运行时产物（统一在 .ai-battle/ 目录下）
+.ai-battle/
 SUMMARY.md
 problem.md
 referee.md
-
-# Agent 指令文件（动态生成）
-CLAUDE*.md
-AGENTS*.md
-GEMINI*.md
 
 # 环境配置
 .env
