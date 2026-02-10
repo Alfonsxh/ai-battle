@@ -24,7 +24,14 @@ fi
 
 # ======================== 版本（从 package.json 读取） ========================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION=$(node -p "require('${SCRIPT_DIR}/package.json').version" 2>/dev/null || echo "0.0.0")
+# 优先使用 npm/npx 注入的环境变量，fallback 到 node 读取，最后 grep 提取
+if [ -n "${npm_package_version:-}" ]; then
+  VERSION="$npm_package_version"
+else
+  VERSION=$(node -p "require('${SCRIPT_DIR}/package.json').version" 2>/dev/null \
+    || grep -o '"version": *"[^"]*"' "${SCRIPT_DIR}/package.json" 2>/dev/null | head -1 | grep -o '[0-9][^"]*' \
+    || echo "0.0.0")
+fi
 
 # ======================== 颜色 ========================
 BLUE='\033[1;34m'
@@ -1805,6 +1812,12 @@ cmd_help() {
 
     Gemini:
       GEMINI_API_KEY    API Key (如需自定义)
+
+  项目:
+    GitHub: https://github.com/Alfonsxh/ai-battle
+    npm:    https://www.npmjs.com/package/ai-battle
+    作者:   Alfons
+    许可:   MIT
 
 HELP
 }
