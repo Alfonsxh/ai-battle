@@ -1816,7 +1816,7 @@ cmd_help() {
   项目:
     GitHub: https://github.com/Alfonsxh/ai-battle
     npm:    https://www.npmjs.com/package/ai-battle
-    作者:   Alfons
+    作者:   Alfons <alfonsxh@gmail.com>
     许可:   MIT
 
 HELP

@@ -1,6 +1,6 @@
 {
     "name": "ai-battle",
-    "version": "0.1.7",
+    "version": "0.1.8",
     "description": "让多个 AI Agent 对同一问题进行结构化圆桌讨论",
     "bin": {
         "ai-battle": "./ai-battle.sh"
