@@ -10,16 +10,39 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/ai-battle"><img src="https://img.shields.io/npm/v/ai-battle?style=flat-square&logo=npm&logoColor=white&color=CB3837" alt="npm version" /></a>
+  <a href="https://github.com/Alfonsxh/ai-battle/actions/workflows/publish.yml"><img src="https://img.shields.io/github/actions/workflow/status/Alfonsxh/ai-battle/publish.yml?style=flat-square&logo=githubactions&logoColor=white" alt="publish" /></a>
   <img src="https://img.shields.io/badge/Bash-4%2B-4EAA25?style=flat-square&logo=gnubash&logoColor=white" alt="Bash 4+" />
   <img src="https://img.shields.io/badge/Dep-jq-blue?style=flat-square" alt="jq" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow?style=flat-square" alt="MIT License" /></a>
 </p>
 
 <p align="center">
-  <a href="README.md">📖 English</a>
+  <a href="README.md">English</a> ·
+  <a href="https://www.npmjs.com/package/ai-battle">NPM</a> ·
+  <a href="https://github.com/Alfonsxh/ai-battle/issues">Issues</a> ·
+  <a href="https://github.com/Alfonsxh/ai-battle/pulls">PRs</a> ·
+  <a href="LICENSE">许可证</a>
 </p>
 
 ---
+
+<details>
+<summary><b>目录</b></summary>
+
+- [特性](#特性)
+- [快速开始](#快速开始)
+- [安装](#安装)
+- [前置依赖](#前置依赖)
+- [用法](#用法)
+- [示例](#示例)
+- [工作流程](#工作流程)
+- [产出结构](#产出结构)
+- [扩展 Agent](#扩展-agent)
+- [环境变量](#环境变量)
+- [参与贡献](#参与贡献)
+- [许可](#许可)
+
+</details>
 
 ## ✨ 特性
 
@@ -70,7 +93,7 @@ npm install -g ai-battle
 
 ## 📖 用法
 
-```
+```text
 ai-battle [options]
 ai-battle help
 ```
