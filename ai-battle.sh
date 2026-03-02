@@ -23,12 +23,31 @@ if [ -f ".env" ]; then
 fi
 
 # ======================== 版本（从 package.json 读取） ========================
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 解析脚本真实路径（支持全局安装后经由软链接启动）
+resolve_script_dir() {
+  local src="${BASH_SOURCE[0]}"
+
+  while [ -L "$src" ]; do
+    local dir target
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    target="$(readlink "$src")"
+    if [[ "$target" != /* ]]; then
+      src="${dir}/${target}"
+    else
+      src="$target"
+    fi
+  done
+
+  cd -P "$(dirname "$src")" && pwd
+}
+
+SCRIPT_DIR="$(resolve_script_dir)"
+
 # 优先使用 npm/npx 注入的环境变量，fallback 到 node 读取，最后 grep 提取
 if [ -n "${npm_package_version:-}" ]; then
   VERSION="$npm_package_version"
 else
-  VERSION=$(node -p "require('${SCRIPT_DIR}/package.json').version" 2>/dev/null \
+  VERSION=$(node -p "require(process.argv[1]).version" "${SCRIPT_DIR}/package.json" 2>/dev/null \
     || grep -o '"version": *"[^"]*"' "${SCRIPT_DIR}/package.json" 2>/dev/null | head -1 | grep -o '[0-9][^"]*' \
     || echo "0.0.0")
 fi
@@ -50,6 +69,8 @@ DEFAULT_MAX_ROUNDS=10
 WORK_DIR=".ai-battle"
 PROBLEM_FILE="problem.md"
 ROUNDS_DIR="${WORK_DIR}/rounds"
+ORDERS_DIR="${WORK_DIR}/orders"
+ORDER_HISTORY_FILE="${WORK_DIR}/order_history.jsonl"
 CONSENSUS_FILE="${WORK_DIR}/consensus.md"
 LOG_FILE="${WORK_DIR}/battle.log"
 CONFIG_FILE="${WORK_DIR}/config.json"
@@ -566,6 +587,138 @@ agent_md_file() {
   echo "${AGENTS_DIR}/${filename}"
 }
 
+# 查找 agent 在数组中的索引
+# 参数: $1=目标 agent  $2...=agent 列表
+# 输出: 索引（找不到返回 -1）
+find_agent_index() {
+  local target="$1"
+  shift
+  local agents=("$@")
+
+  for ((idx=0; idx<${#agents[@]}; idx++)); do
+    if [ "${agents[$idx]}" = "$target" ]; then
+      echo "$idx"
+      return 0
+    fi
+  done
+
+  echo "-1"
+  return 0
+}
+
+# 校验轮次顺序 CSV 是否与当前 agent 列表一一对应
+# 参数: $1=order_csv  $2...=agent 列表
+# 返回: 0=有效, 1=无效
+validate_round_order_csv() {
+  local order_csv="$1"
+  shift
+  local agents=("$@")
+  local order=()
+
+  [ -n "$order_csv" ] || return 1
+  IFS=',' read -ra order <<< "$order_csv"
+
+  if [ "${#order[@]}" -ne "${#agents[@]}" ]; then
+    return 1
+  fi
+
+  for ((idx=0; idx<${#order[@]}; idx++)); do
+    order[$idx]=$(echo "${order[$idx]}" | xargs)
+  done
+
+  # 每个 agent 必须且仅出现一次，避免顺序文件损坏导致错位
+  for expected in "${agents[@]}"; do
+    local count=0
+    for got in "${order[@]}"; do
+      if [ "$got" = "$expected" ]; then
+        count=$((count + 1))
+      fi
+    done
+    if [ "$count" -ne 1 ]; then
+      return 1
+    fi
+  done
+
+  return 0
+}
+
+# Fisher-Yates 洗牌，生成当前轮次的随机顺序
+# 参数: $@=agent 列表
+# 输出: csv 字符串（如 a,b,c）
+shuffle_round_order_csv() {
+  local shuffled=("$@")
+  local n=${#shuffled[@]}
+
+  if [ "$n" -eq 0 ]; then
+    echo ""
+    return 0
+  fi
+
+  for ((i=n-1; i>0; i--)); do
+    local j=$((RANDOM % (i + 1)))
+    local tmp="${shuffled[$i]}"
+    shuffled[$i]="${shuffled[$j]}"
+    shuffled[$j]="$tmp"
+  done
+
+  local csv="${shuffled[0]}"
+  for ((i=1; i<n; i++)); do
+    csv+=",${shuffled[$i]}"
+  done
+  echo "$csv"
+}
+
+# 记录轮次顺序历史（jsonl），用于兜底追踪和恢复审计
+# 参数: $1=round  $2=order_csv  $3=source(random|recovered)
+record_round_order() {
+  local round="$1"
+  local order_csv="$2"
+  local source="${3:-random}"
+  local ts
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  local order_json
+  order_json=$(printf '%s' "$order_csv" | jq -R 'split(",")')
+
+  jq -cn \
+    --arg ts "$ts" \
+    --arg source "$source" \
+    --argjson round "$round" \
+    --argjson order "$order_json" \
+    '{ts: $ts, round: $round, source: $source, order: $order}' \
+    >> "$ORDER_HISTORY_FILE"
+}
+
+# 读取或生成某一轮的顺序：
+# 1) 若顺序文件存在且有效，复用；2) 否则随机生成并落盘
+# 参数: $1=round  $2...=agent 列表
+# 输出: order_csv
+resolve_round_order_csv() {
+  local round="$1"
+  shift
+  local agents=("$@")
+  local order_file="${ORDERS_DIR}/round_${round}.order"
+  local order_csv=""
+  local source="recovered"
+
+  if [ -f "$order_file" ] && [ -s "$order_file" ]; then
+    order_csv=$(tr -d '\r\n' < "$order_file")
+    if ! validate_round_order_csv "$order_csv" "${agents[@]}"; then
+      log_and_print "${YELLOW}⚠️ Round ${round} 顺序文件无效，已重新随机${NC}"
+      order_csv=""
+    fi
+  fi
+
+  if [ -z "$order_csv" ]; then
+    order_csv=$(shuffle_round_order_csv "${agents[@]}")
+    echo "$order_csv" > "$order_file"
+    source="random"
+  fi
+
+  record_round_order "$round" "$order_csv" "$source"
+  echo "$order_csv"
+}
+
 # 上帝视角: 等待用户输入补充信息
 # 参数: $1=当前轮次
 # 输出: stdout 用户输入的补充信息（可为空）
@@ -1069,8 +1222,8 @@ cmd_run() {
     exit 1
   fi
 
-  # 创建 rounds 目录
-  mkdir -p "$ROUNDS_DIR" "$SESSIONS_DIR" "$AGENTS_DIR"
+  # 创建运行目录（包含顺序记录目录）
+  mkdir -p "$ROUNDS_DIR" "$SESSIONS_DIR" "$AGENTS_DIR" "$ORDERS_DIR"
 
   # 动态生成各 Agent 的指令文件（新建和恢复模式都需要更新）
   for agent in "${available_agents[@]}"; do
@@ -1117,6 +1270,7 @@ cmd_run() {
   log_and_print "  📝 问题: $(head -1 "$PROBLEM_FILE")"
   log_and_print "  🤖 Agent: ${available_agents[*]}"
   log_and_print "  🔄 最大轮次: $max_rounds"
+  log_and_print "  🔀 发言顺序: 每轮随机（自动记录并可恢复）"
   if $god_mode; then
     log_and_print "${CYAN}  👁️  上帝视角: 开启${NC}"
   fi
@@ -1160,7 +1314,7 @@ cmd_run() {
     round=$((prev_round + 1))
 
     # 更新配置: 状态为 running，max_rounds 使用命令行参数
-    jq --argjson m "$max_rounds" '.status = "running" | .max_rounds = $m' \
+    jq --argjson m "$max_rounds" '.status = "running" | .max_rounds = $m | .order_mode = "round_random"' \
       "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" \
       && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
 
@@ -1197,7 +1351,7 @@ cmd_run() {
       --argjson max_rounds "$max_rounds" \
       --arg problem "$problem" \
       '{agents: $agents, max_rounds: $max_rounds, problem: $problem,
-        status: "running", current_round: 0}' \
+        status: "running", current_round: 0, order_mode: "round_random", last_round_order: ""}' \
       > "$CONFIG_FILE"
 
     # 清空日志
@@ -1353,10 +1507,21 @@ ${all_responses_r1}请进行裁判总结。" "referee_round_1")
   # 提取为函数逻辑，供主循环和追加轮次复用
   while [ "$round" -le "$max_rounds" ]; do
     local remaining=$((max_rounds - round))
+    local round_order_csv
+    round_order_csv=$(resolve_round_order_csv "$round" "${available_agents[@]}")
+    local round_order=()
+    IFS=',' read -ra round_order <<< "$round_order_csv"
 
-    # 每个 agent 依次发言，看到所有其他 agent 的上一轮回复
-    for ((i=0; i<agent_count; i++)); do
-      local agent="${available_agents[$i]}"
+    log_and_print "${CYAN}🔀 Round $round 顺序: ${round_order[*]}${NC}"
+
+    # 每轮默认随机顺序发言，优先复用已落盘顺序（便于恢复）
+    for agent in "${round_order[@]}"; do
+      local i
+      i=$(find_agent_index "$agent" "${available_agents[@]}")
+      if [ "$i" -lt 0 ]; then
+        log_and_print "${YELLOW}⚠️ 跳过未知 agent: ${agent}${NC}"
+        continue
+      fi
       local base
       base=$(agent_base "$agent")
       local color
@@ -1368,8 +1533,8 @@ ${all_responses_r1}请进行裁判总结。" "referee_round_1")
       # 构建其他 agent 回复的 XML 块
       local others_responses=""
       for ((j=0; j<agent_count; j++)); do
-        if [ "$j" != "$i" ]; then
-          local other="${available_agents[$j]}"
+        local other="${available_agents[$j]}"
+        if [ "$other" != "$agent" ]; then
           others_responses+="<${other}_response>
 ${responses[$j]}
 </${other}_response>
@@ -1502,7 +1667,8 @@ ${all_responses}请进行裁判总结。" "referee_round_${round}")
     fi
 
     # 更新配置
-    jq --argjson r "$round" '.current_round = $r | .status = "running"' \
+    jq --argjson r "$round" --arg o "$round_order_csv" \
+      '.current_round = $r | .status = "running" | .last_round_order = $o' \
       "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
 
     # 上帝视角: 每轮结束后注入（裁判总结后再让 god 输入）
@@ -1554,9 +1720,20 @@ ${all_responses}请进行裁判总结。" "referee_round_${round}")
     # 继续讨论循环（逻辑与上方 Round 2+ 完全相同）
     while [ "$round" -le "$max_rounds" ]; do
       local remaining=$((max_rounds - round))
+      local round_order_csv
+      round_order_csv=$(resolve_round_order_csv "$round" "${available_agents[@]}")
+      local round_order=()
+      IFS=',' read -ra round_order <<< "$round_order_csv"
 
-      for ((i=0; i<agent_count; i++)); do
-        local agent="${available_agents[$i]}"
+      log_and_print "${CYAN}🔀 Round $round 顺序: ${round_order[*]}${NC}"
+
+      for agent in "${round_order[@]}"; do
+        local i
+        i=$(find_agent_index "$agent" "${available_agents[@]}")
+        if [ "$i" -lt 0 ]; then
+          log_and_print "${YELLOW}⚠️ 跳过未知 agent: ${agent}${NC}"
+          continue
+        fi
         local base
         base=$(agent_base "$agent")
         local color
@@ -1568,8 +1745,8 @@ ${all_responses}请进行裁判总结。" "referee_round_${round}")
         # 构建其他 agent 回复的 XML 块
         local others_responses=""
         for ((j=0; j<agent_count; j++)); do
-          if [ "$j" != "$i" ]; then
-            local other="${available_agents[$j]}"
+          local other="${available_agents[$j]}"
+          if [ "$other" != "$agent" ]; then
             others_responses+="<${other}_response>
 ${responses[$j]}
 </${other}_response>
@@ -1697,7 +1874,8 @@ ${all_responses}请进行裁判总结。" "referee_round_${round}")
       fi
 
       # 更新配置
-      jq --argjson r "$round" '.current_round = $r | .status = "running"' \
+      jq --argjson r "$round" --arg o "$round_order_csv" \
+        '.current_round = $r | .status = "running" | .last_round_order = $o' \
         "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
 
       # 上帝视角: 每轮结束后注入（裁判总结后再让 god 输入）
@@ -1751,6 +1929,7 @@ cmd_help() {
     --agents, -a <a1,a2>   Select participating agents (default: claude,codex)
                            Supports same-type agents: --agents gemini,gemini
     --rounds, -r <N>       Max discussion rounds (default: 10)
+                           Speaking order is randomized every round by default
     --god, -g              Enable god mode (inject instructions after each round)
     --referee [agent]      Enable referee mode (summarize each round, detect
                            consensus, generate final summary)
@@ -1788,6 +1967,8 @@ cmd_help() {
     .ai-battle/rounds/              Per-round records (round_N_<agent>.md)
     .ai-battle/rounds/referee_*.md  Referee summaries (--referee)
     .ai-battle/rounds/god_*.md      God mode injections (--god)
+    .ai-battle/orders/round_*.order Per-round speaking order (fallback/recovery)
+    .ai-battle/order_history.jsonl  Full order history (audit trail)
     .ai-battle/sessions/            Raw Agent CLI output
     .ai-battle/consensus.md         Consensus conclusion (if reached)
     .ai-battle/battle.log           Full log
